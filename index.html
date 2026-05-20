@@ -143,6 +143,7 @@ table.hist tr:hover td{background:var(--surface);}
   <button onclick="showTab('program',this)">Program</button>
   <button onclick="showTab('stats',this)">Stats</button>
   <button onclick="showTab('dump',this)">Copy dump</button>
+  <button onclick="showTab('settings',this)">⚙ Sync</button>
 </nav>
 
 <!-- ══════════════════════════════════════════════════
@@ -902,12 +903,114 @@ table.hist tr:hover td{background:var(--surface);}
   </div>
 </section>
 
+<!-- ══════════════════════════════════════════════════
+     SETTINGS / SYNC
+═══════════════════════════════════════════════════ -->
+<section id="settings">
+  <div class="card">
+    <div class="card-title">Google Sheets sync</div>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:.85rem;">Paste your Apps Script Web App URL below. Every session save will automatically sync to your sheet.</p>
+    <label>Apps Script URL</label>
+    <input type="url" id="sheets-url" placeholder="https://script.google.com/macros/s/…/exec" style="font-family:var(--mono);font-size:11px;">
+    <div class="row-btns" style="margin-top:.75rem;">
+      <button class="btn btn-primary btn-sm" onclick="saveSheetUrl()">Save URL</button>
+      <button class="btn btn-sm" onclick="testSync()">Test connection</button>
+      <button class="btn btn-danger btn-sm" onclick="clearSheetUrl()">Clear</button>
+    </div>
+    <div id="sync-status" style="font-size:12px;margin-top:.5rem;color:var(--muted);font-family:var(--mono);"></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Sync history</div>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:.6rem;">Last 5 sync attempts.</p>
+    <div id="sync-log" style="font-family:var(--mono);font-size:11px;color:var(--muted);line-height:2;"></div>
+  </div>
+</section>
+
 <div class="toast" id="toast"></div>
 
 <script>
 const KEY = 'cal_v3';
 const get = () => { try { return JSON.parse(localStorage.getItem(KEY))||[]; } catch { return []; } };
 const put = s => localStorage.setItem(KEY, JSON.stringify(s));
+
+const SHEETS_KEY = 'cal_sheets_url';
+const SYNC_LOG_KEY = 'cal_sync_log';
+const getSheetUrl = () => localStorage.getItem(SHEETS_KEY) || '';
+const getSyncLog = () => { try { return JSON.parse(localStorage.getItem(SYNC_LOG_KEY))||[]; } catch { return []; } };
+const putSyncLog = l => localStorage.setItem(SYNC_LOG_KEY, JSON.stringify(l));
+
+function saveSheetUrl() {
+  const url = document.getElementById('sheets-url').value.trim();
+  if (!url) { setSyncStatus('No URL entered.', false); return; }
+  localStorage.setItem(SHEETS_KEY, url);
+  setSyncStatus('✓ URL saved. Save a session to sync.', true);
+}
+
+function clearSheetUrl() {
+  localStorage.removeItem(SHEETS_KEY);
+  document.getElementById('sheets-url').value = '';
+  setSyncStatus('URL cleared.', false);
+}
+
+function setSyncStatus(msg, ok) {
+  const el = document.getElementById('sync-status');
+  if (el) { el.textContent = msg; el.style.color = ok ? 'var(--green)' : 'var(--amber)'; }
+}
+
+function addSyncLog(entry) {
+  const log = getSyncLog();
+  log.unshift({ time: new Date().toLocaleTimeString(), ...entry });
+  putSyncLog(log.slice(0, 5));
+  renderSyncLog();
+}
+
+function renderSyncLog() {
+  const el = document.getElementById('sync-log');
+  if (!el) return;
+  const log = getSyncLog();
+  if (!log.length) { el.textContent = 'No syncs yet.'; return; }
+  el.innerHTML = log.map(l =>
+    `<div style="color:${l.ok ? 'var(--green)' : 'var(--red)'}">${l.time} — ${l.type||''} — ${l.ok ? '✓ synced' : '✗ ' + (l.err||'failed')}</div>`
+  ).join('');
+}
+
+async function syncToSheets(session) {
+  const url = getSheetUrl();
+  if (!url) return;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      body: JSON.stringify(session),
+    });
+    const json = await res.json();
+    if (json.status === 'ok') {
+      toast('Saved + synced ✓');
+      addSyncLog({ ok: true, type: session.type });
+    } else {
+      toast('Saved locally — sync error');
+      addSyncLog({ ok: false, type: session.type, err: json.message || 'script error' });
+    }
+  } catch (err) {
+    toast('Saved locally — sync failed');
+    addSyncLog({ ok: false, type: session.type, err: err.message });
+  }
+}
+
+async function testSync() {
+  const url = document.getElementById('sheets-url').value.trim() || getSheetUrl();
+  if (!url) { setSyncStatus('No URL saved yet.', false); return; }
+  setSyncStatus('Testing…', true);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      body: JSON.stringify({ id: 'test', date: new Date().toISOString().slice(0,10), type: 'TEST — ignore', mcgill: false }),
+    });
+    const json = await res.json();
+    setSyncStatus(json.status === 'ok' ? '✓ Connection working!' : '✗ Script returned error: ' + json.message, json.status === 'ok');
+  } catch (err) {
+    setSyncStatus('✗ Failed: ' + err.message, false);
+  }
+}
 
 const PUSH_CHAIN = ['Incline','Standard','Diamond','Archer','Pseudo planche'];
 const DIP_CHAIN  = ['Chair / bench','Parallel bars','Rings dip','Weighted'];
@@ -927,6 +1030,7 @@ function showTab(id, btn) {
   btn.classList.add('active');
   if(id==='history') renderHistory();
   if(id==='stats') renderStats();
+  if(id==='settings') { const su = document.getElementById('sheets-url'); if(su) su.value = getSheetUrl(); renderSyncLog(); }
 }
 
 function toggleInfo(btn) {
@@ -989,7 +1093,9 @@ function saveSession() {
     ...collectStrengthData(),
   };
   const sessions = get(); sessions.unshift(s); put(sessions);
-  toast('Saved!'); clearForm(); resetTimer('str'); renderStats();
+  clearForm(); resetTimer('str'); renderStats();
+  syncToSheets(s).catch(()=>{});
+  if (!getSheetUrl()) toast('Saved!');
 }
 
 function saveCardio() {
@@ -1002,9 +1108,14 @@ function saveCardio() {
     dur: gn('c-dur')||gn('c-walk-dur'), dist: gn('c-dist')||gn('c-walk-dist'),
     hr: gn('c-hr')||gn('c-walk-hr'),
     sprint_proto: gv('c-sprint-proto'), sprint_sets: gn('c-sprint-sets'),
+    mcg_bd_sets: gn('c-mcg-bd-sets'), mcg_bd_reps: gn('c-mcg-bd-reps'), mcg_bd_hold: gn('c-mcg-bd-hold'),
+    mcg_db_sets: gn('c-mcg-db-sets'), mcg_db_reps: gn('c-mcg-db-reps'),
+    mcg_sp_sets: gn('c-mcg-sp-sets'), mcg_sp_hold: gn('c-mcg-sp-hold'), mcg_sp_var: gv('c-mcg-sp-var'),
   };
   const sessions = get(); sessions.unshift(s); put(sessions);
-  toast('Saved!'); clearCardio(); resetTimer('car'); renderStats();
+  clearCardio(); resetTimer('car'); renderStats();
+  syncToSheets(s).catch(()=>{});
+  if (!getSheetUrl()) toast('Saved!');
 }
 
 function clearForm() {
@@ -1100,74 +1211,82 @@ function genDump(source) {
   const isStr = source === 'str';
   const isCardio = source === 'car';
 
-  // pull shared fields
-  const date  = isStr ? gv('f-date')  : gv('c-date');
-  const week  = isStr ? gv('f-week')  : gv('c-week');
-  const type  = isStr ? gv('f-type')  : gv('c-type');
-  const back  = isStr ? gv('f-back')  : gv('c-back');
-  const notes = isStr ? gv('f-notes') : gv('c-notes');
-  const mcgill = isStr
-    ? (document.getElementById('f-mcgill')?.checked ? 'Yes' : 'No')
-    : (document.getElementById('c-mcgill')?.checked ? 'Yes' : 'No');
-  const dur = isStr ? gv('f-dur') : (gv('c-dur') || gv('c-walk-dur'));
+  // Read from the most recently saved session in localStorage that matches the source type
+  const all = get();
+  const strTypes = ['Strength A', 'Strength B'];
+  const cardioTypes = ['Z3 Run', 'Z2 Walk', 'Sprint', 'Rest/Mobility'];
+  const s = isStr
+    ? all.find(x => strTypes.includes(x.type))
+    : all.find(x => cardioTypes.includes(x.type));
 
-  if (!type) { document.getElementById('dump-out').textContent = 'No session type selected on that tab yet.'; return; }
+  if (!s) {
+    document.getElementById('dump-out').textContent = isStr
+      ? 'No strength session saved yet. Fill in the Log tab and hit Save first.'
+      : 'No cardio session saved yet. Fill in the Cardio tab and hit Save first.';
+    return;
+  }
+
+  const date  = s.date  || '—';
+  const week  = s.week  || '—';
+  const type  = s.type  || '—';
+  const back  = s.back  || '—';
+  const notes = s.notes || '—';
+  const dur   = s.dur   || '—';
+  const mcgill = s.mcgill ? 'Yes' : 'No';
 
   const lines = [
     'SESSION LOG',
     '─────────────────────────',
-    `Date:         ${date || '—'}`,
-    `Week:         ${week || '—'}`,
+    `Date:         ${date}`,
+    `Week:         ${week}`,
     `Type:         ${type}`,
-    `Back status:  ${back || '—'}`,
+    `Back status:  ${back}`,
     '─────────────────────────',
   ];
 
   if (isStr && type === 'Strength A') {
-    lines.push(`Push:         ${gv('sa-push-var') || '—'} (${gv('sa-push-sets')||'—'}×${gv('sa-push-reps')||'—'})`);
-    lines.push(`Pike push-up: ${gv('sa-pike-var') || '—'} (${gv('sa-pike-sets')||'—'}×${gv('sa-pike-reps')||'—'})`);
-    lines.push(`Dip:          ${gv('sa-dip-var')  || '—'} (${gv('sa-dip-sets')||'—'}×${gv('sa-dip-reps')||'—'})`);
-    lines.push(`L-sit:        ${gv('sa-lsit-var') || '—'} — best ${gv('sa-lsit-hold')||'—'}s (${gv('sa-lsit-sets')||'—'} sets)`);
-    lines.push(`Hollow body:  ${gv('sa-hollow-var')|| '—'} — best ${gv('sa-hollow-hold')||'—'}s (${gv('sa-hollow-sets')||'—'} sets)`);
-    lines.push(`Glute bridge: ${gv('sa-glute-var') || '—'} (${gv('sa-glute-sets')||'—'}×${gv('sa-glute-reps')||'—'})`);
+    lines.push(`Push:         ${s.push_var||'—'} (${s.push_sets||'—'}×${s.push_reps||'—'})`);
+    lines.push(`Pike push-up: ${s.pike_var||'—'} (${s.pike_sets||'—'}×${s.pike_reps||'—'})`);
+    lines.push(`Dip:          ${s.dip_var||'—'} (${s.dip_sets||'—'}×${s.dip_reps||'—'})`);
+    lines.push(`L-sit:        ${s.lsit_var||'—'} — best ${s.lsit_hold||'—'}s (${s.lsit_sets||'—'} sets)`);
+    lines.push(`Hollow body:  ${s.hollow_var||'—'} — best ${s.hollow_hold||'—'}s (${s.hollow_sets||'—'} sets)`);
+    lines.push(`Glute bridge: ${s.glute_var||'—'} (${s.glute_sets||'—'}×${s.glute_reps||'—'})`);
   }
 
   if (isStr && type === 'Strength B') {
-    lines.push(`Dead hang:    ${gv('sb-hang-hold')||'—'}s × ${gv('sb-hang-sets')||'—'} sets`);
-    lines.push(`Pull:         ${gv('sb-pull-var') || '—'} (${gv('sb-pull-sets')||'—'}×${gv('sb-pull-reps')||'—'})`);
-    lines.push(`Row:          ${gv('sb-row-var')  || '—'} (${gv('sb-row-sets')||'—'}×${gv('sb-row-reps')||'—'})`);
-    lines.push(`Pull-apart:   ${gv('sb-band-tens')||'—'} band (${gv('sb-band-sets')||'—'}×${gv('sb-band-reps')||'—'})`);
-    lines.push(`SL RDL:       ${gv('sb-rdl-load')||'BW'} (${gv('sb-rdl-sets')||'—'}×${gv('sb-rdl-reps')||'—'}/side)`);
-    lines.push(`Pistol:       ${gv('sb-pis-var')  || '—'} (${gv('sb-pis-sets')||'—'}×${gv('sb-pis-reps')||'—'}/side)`);
-    lines.push(`Jefferson:    ${gv('sb-jeff-sets')||'—'}×${gv('sb-jeff-reps')||'—'} — pain free: ${gv('sb-jeff-pain')||'—'}`);
+    lines.push(`Dead hang:    ${s.hang_hold||'—'}s × ${s.hang_sets||'—'} sets`);
+    lines.push(`Pull:         ${s.pull_var||'—'} (${s.pull_sets||'—'}×${s.pull_reps||'—'})`);
+    lines.push(`Row:          ${s.row_var||'—'} (${s.row_sets||'—'}×${s.row_reps||'—'})`);
+    lines.push(`Pull-apart:   ${s.band_tens||'—'} band (${s.band_sets||'—'}×${s.band_reps||'—'})`);
+    lines.push(`SL RDL:       ${s.rdl_load||'BW'} (${s.rdl_sets||'—'}×${s.rdl_reps||'—'}/side)`);
+    lines.push(`Pistol:       ${s.pis_var||'—'} (${s.pis_sets||'—'}×${s.pis_reps||'—'}/side)`);
+    lines.push(`Jefferson:    ${s.jeff_sets||'—'}×${s.jeff_reps||'—'} — pain free: ${s.jeff_pain||'—'}`);
   }
 
   if (isCardio) {
-    const dist    = gv('c-dist') || gv('c-walk-dist');
-    const hr      = gv('c-hr')   || gv('c-walk-hr');
-    const proto   = gv('c-sprint-proto');
-    const sprSets = gv('c-sprint-sets');
-    if (dur)    lines.push(`Duration:     ${dur} min`);
-    if (dist)   lines.push(`Distance:     ${dist} mi`);
-    if (hr)     lines.push(`Avg HR:       ${hr} bpm`);
-    if (type === 'Sprint' && proto) lines.push(`Protocol:     ${proto}${sprSets ? ` — ${sprSets} sets completed` : ''}`);
+    if (dur)      lines.push(`Duration:     ${dur} min`);
+    if (s.dist)   lines.push(`Distance:     ${s.dist} mi`);
+    if (s.hr)     lines.push(`Avg HR:       ${s.hr} bpm`);
+    if (type === 'Sprint' && s.sprint_proto) lines.push(`Protocol:     ${s.sprint_proto}${s.sprint_sets ? ` — ${s.sprint_sets} sets completed` : ''}`);
   }
 
   if (dur && !isCardio) lines.push(`Duration:     ${dur} min`);
 
   lines.push('─────────────────────────');
   lines.push(`McGill Big 3: ${mcgill}`);
-  if (isStr) {
-    lines.push(`Bird dog:     ${gv('mcg-bd-sets')||'—'}×${gv('mcg-bd-reps')||'—'}/side @ ${gv('mcg-bd-hold')||'—'}s`);
-    lines.push(`Dead bug:     ${gv('mcg-db-sets')||'—'}×${gv('mcg-db-reps')||'—'}/side`);
-    lines.push(`Side plank:   ${gv('mcg-sp-var')||'—'} — ${gv('mcg-sp-hold')||'—'}s × ${gv('mcg-sp-sets')||'—'} sets`);
+
+  // McGill data stored as nested objects in saveSession / flat in saveCardio
+  if (isStr && s.mcg_bd) {
+    lines.push(`Bird dog:     ${s.mcg_bd.sets||'—'}×${s.mcg_bd.reps||'—'}/side @ ${s.mcg_bd.hold||'—'}s`);
+    lines.push(`Dead bug:     ${s.mcg_db?.sets||'—'}×${s.mcg_db?.reps||'—'}/side`);
+    lines.push(`Side plank:   ${s.mcg_sp?.var||'—'} — ${s.mcg_sp?.hold||'—'}s × ${s.mcg_sp?.sets||'—'} sets`);
   }
   if (isCardio) {
-    lines.push(`Bird dog:     ${gv('c-mcg-bd-sets')||'—'}×${gv('c-mcg-bd-reps')||'—'}/side @ ${gv('c-mcg-bd-hold')||'—'}s`);
-    lines.push(`Dead bug:     ${gv('c-mcg-db-sets')||'—'}×${gv('c-mcg-db-reps')||'—'}/side`);
-    lines.push(`Side plank:   ${gv('c-mcg-sp-var')||'—'} — ${gv('c-mcg-sp-hold')||'—'}s × ${gv('c-mcg-sp-sets')||'—'} sets`);
+    lines.push(`Bird dog:     ${s.mcg_bd_sets||'—'}×${s.mcg_bd_reps||'—'}/side @ ${s.mcg_bd_hold||'—'}s`);
+    lines.push(`Dead bug:     ${s.mcg_db_sets||'—'}×${s.mcg_db_reps||'—'}/side`);
+    lines.push(`Side plank:   ${s.mcg_sp_var||'—'} — ${s.mcg_sp_hold||'—'}s × ${s.mcg_sp_sets||'—'} sets`);
   }
-  lines.push(`Notes:        ${notes || '—'}`);
+  lines.push(`Notes:        ${notes}`);
 
   document.getElementById('dump-out').textContent = lines.join('\n');
 }
@@ -1238,6 +1357,11 @@ const today = new Date().toISOString().slice(0,10);
 document.getElementById('hdr-date').textContent = new Date().toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
 document.getElementById('f-date').value = today;
 document.getElementById('c-date').value = today;
+// Pre-seed Sheets URL if not already set
+if (!getSheetUrl()) localStorage.setItem(SHEETS_KEY, 'https://script.google.com/macros/s/AKfycbyWKo3UgWJmr39sIjfyrALam1R9QJ91xoCJGCLH8vVbnslZUdptKHoAcsf1EV5HSYc0xw/exec');
+const _su = document.getElementById('sheets-url');
+if (_su) _su.value = getSheetUrl();
+renderSyncLog();
 renderStats();
 </script>
 </body>
